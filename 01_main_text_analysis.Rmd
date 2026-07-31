@@ -1,0 +1,1564 @@
+---
+title: "LLMs in Social Services: Replication Materials"
+output:
+  github_document:
+    toc: true
+date: "`r Sys.Date()`"
+always_allow_html: true
+---
+
+This notebooks replicates all of the figures in the main text, and many of the figures and tables from the SI. For each plot and table, we typically produce a version with all participants and a version only for those who pass the attention check.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r packages, include=FALSE}
+library(tidyverse)
+library(assertr)
+library(magrittr)
+library(stargazer)
+library(ggplot2)
+library(lme4)
+library(plm)
+library(knitr)
+library(estimatr)
+library(cowplot)
+library(sandwich)
+library(pglm)
+library(car)
+
+
+hex_codes <- c(
+  "purple" = "#651a94",
+  "gold" = "#f8b712",
+  "plum" = "#b14092",
+  "sage" = "#08a588",
+  "navy" = "#0a0539"
+)
+
+n_questions <- 45
+n_questions_per_difficulty <- 15
+```
+
+**Initialize functions for plotting**
+
+```{r}
+# set up default plot conditions
+default_plot_conditions <- function(...) {
+  theme_minimal() +
+    theme(
+      text = element_text(size = 16),
+      axis.text.y = element_text(size = 12),
+      axis.text.x = element_text(size = 12)
+    )
+}
+
+# code for default question plot
+default_question_plot <- lst(
+  geom_col(position = position_dodge()),
+  geom_errorbar(aes(ymin = respondent_ci_low, ymax = respondent_ci_high),
+    position = position_dodge(width = .9), width = .15
+  ),
+  geom_text(aes(y = respondent_ci_high + 4,  label = str_glue("{round(respondent_accuracy,1)}%")), position = position_dodge(width=.9), size=4),
+  scale_fill_manual(values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]])),
+  guides(fill = guide_legend(reverse = FALSE)),
+  default_plot_conditions(),
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ),
+  labs(
+    x = "",
+    y = "Question accuracy",
+    fill = ""
+  )
+)
+
+# code for running simple linear model
+lm_model <- function(outcome, df, oth_predictors = c("")) {
+  if (outcome == "respondent_error") {
+    print("Dropping control group for respondent erro")
+    df <- df %>%
+      filter(experiment_type != "control")
+  }
+  if (oth_predictors[1] != "") {
+    oth_predictors <- paste0(oth_predictors, collapse = "+")
+  }
+  full_formula <- as.formula(str_glue("{outcome} ~ {oth_predictors}"))
+  print(full_formula)
+  full <- lm(full_formula, data = df)
+
+  full %>%
+    summary() %>%
+    print()
+  return(full)
+}
+
+# out path for figures
+outpath <- "./_figures"
+filetype <- "pdf"
+```
+
+**Initialize functions for models**
+
+```{r}
+# run overall lm
+run_overall_lm <- function(df) {
+  mod_lm <- lm(respondent_accuracy ~ experiment_type, data = df)
+  print(summary(mod_lm))
+
+  return(mod_lm)
+}
+
+run_continuous_lm <- function(df) {
+  mod_lm <- lm(respondent_accuracy ~ experiment_type + chatbot_accuracy:experiment_type, data = df)
+  print(summary(mod_lm))
+
+  return(mod_lm)
+}
+
+generate_robust_se <- function(mod) {
+  cov <- vcovHC(mod, type = "HC1")
+  return(sqrt(diag(cov)))
+}
+
+generate_cluster_se <- function(plm_mod) {
+  clustered_se <- vcovCL(plm_mod, type = "HC1", cluster = ~id)
+  return(sqrt(diag(clustered_se)))
+}
+
+generate_cluster_se_plm <- function(plm_mod) {
+  clustered_se <- vcovHC(plm_mod, type = "HC1", cluster = "group")
+  return(sqrt(diag(clustered_se)))
+}
+
+generate_cluster_se_lmer <- function(lmer_mod, df) {
+  clustered_standard_errors <- vcovCR(lmer_mod, type = "CR2", cluster=df$id)
+  return(sqrt(diag(clustered_standard_errors)))
+}
+```
+
+## Load Data
+
+```{r}
+# load ec data
+df <- readRDS("./data.RDS") %>% 
+  verify(is.numeric(question_order_num))
+```
+
+# Figure 1
+
+## Figure 1a
+
+```{r}
+# prep data
+df_lm_prep <- df %>%
+  mutate(
+    experiment_label = case_when(
+      experiment_type == "control" ~ "Control",
+      num_incorrect %in% c(0, 1, 2) ~ "High\n96-100% accurate",
+      num_incorrect %in% c(3, 6, 9) ~ "Medium\n80-93% accurate",
+      num_incorrect %in% c(12, 15, 18, 21) ~ "Low\n53-73% accurate",
+      TRUE ~ NA
+    ) %>%
+      factor(
+        levels = c("Control", "Low\n53-73% accurate", "Medium\n80-93% accurate", "High\n96-100% accurate")
+      ),
+    num_incorrect = if_else(is.na(num_incorrect), 0, num_incorrect)
+  ) %>%
+  group_by(
+    id, experiment_label, passed_attention, num_incorrect, experiment_type
+  ) %>%
+  summarize(
+    respondent_accuracy = 100 * mean(respondent_correct)
+  ) %>%
+  mutate(chatbot_accuracy = if_else(experiment_type != "control", 100 * (n_questions - num_incorrect)/n_questions, 0)) %>% 
+  ungroup()
+
+nrow(df_lm_prep)
+```
+
+
+```{r}
+# simple lm models
+lm_all <- df_lm_prep %>%
+  run_overall_lm()
+
+lm_all_cont <- df_lm_prep %>% 
+  run_continuous_lm()
+
+lm_pass <- df_lm_prep %>%
+  filter(passed_attention == "Passed attention") %>%
+  run_overall_lm()
+
+lm_pass_cont <- df_lm_prep %>%
+  filter(passed_attention == "Passed attention")%>% 
+  run_continuous_lm()
+
+# categorical lm models
+lm_all_cat <- lm_model("respondent_accuracy", df = df_lm_prep, oth_predictors = c("experiment_label"))
+
+lm_pass_cat <- lm_model("respondent_accuracy", df = df_lm_prep %>%
+  filter(passed_attention == "Passed attention"), oth_predictors = c("experiment_label"))
+
+# combine all of them
+models <- lst(lm_all, lm_all_cat, lm_all_cont, lm_pass, lm_pass_cat, lm_pass_cont)
+stargazer(models, type = "text", 
+          se = map(models, ~generate_robust_se(.)), 
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+
+Produce effect size plots:
+
+```{r, fig.width=10, message=FALSE}
+produce_mod_df_output <- function(mod1, mod2) {
+  newdata1 <- tibble(experiment_type = c("control", "treatment"))
+  newdata2 <- tibble(experiment_label = c("Control", "Low\n53-73% accurate", "Medium\n80-93% accurate", "High\n96-100% accurate"))
+  
+  mod_lm_df <- mod1 %>% 
+  car::Predict(newdata = newdata1, interval = "confidence", level = 0.95, vcov. = vcovHC(mod1, type='HC1')) %>% 
+    cbind(newdata1) %>% 
+    mutate(model = "Treatment only") %>%
+    rename(term = experiment_type) %>% 
+    bind_rows(car::Predict(mod2, newdata = newdata2,
+              interval = "confidence", level = 0.95, vcov. = vcovHC(mod2, type='HC1')) %>% 
+                cbind(newdata2) %>% 
+      mutate(model = "Treatment x Number of\nincorrect chatbot suggestions") %>% 
+        rename(term = experiment_label))
+
+  mod_plot_df <- mod_lm_df %>% 
+    mutate(term_label = str_to_sentence(term) %>% if_else(. == "Treatment", "Average chatbot\n53-100%", .)) %>% 
+    mutate(term_label = factor(term_label %>% str_replace_all(" accurate", ""),
+      levels = c("Control", "Average chatbot\n53-100%", "Low\n53-73%", "Medium\n80-93%", "High\n96-100%"),
+      ordered = TRUE
+    ))
+
+  return(mod_plot_df)
+}
+
+effect_plt <- produce_mod_df_output(lm_pass, lm_pass_cat) %>%
+  filter(!(model == "By chatbot quality" & term_label == "Control")) %>% 
+  mutate(model = if_else(model == 'Treatment only', 'Overall effect', 'By chatbot quality') %>% 
+           factor(levels = c("Overall effect", "By chatbot quality"))) %>% 
+    ggplot(aes(x = term_label, y = fit)) +
+    geom_col(aes(fill = if_else(term_label == 'Control', 'Control', 'Treatment')),
+            position = "dodge", width=0.9) +
+    geom_errorbar(aes(ymin = lwr, ymax = upr), position = position_dodge(width = .9), width = .15) +
+    geom_text(aes(y = upr+3, label = str_c(round(fit,1), "%")), 
+               position = position_dodge(width = .9)) +
+    scale_fill_manual(values=c(hex_codes[[2]], hex_codes[[1]])) +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    geom_vline(aes(xintercept = 2.5), color='gray', linetype = "dotted", linewidth=1.5) +
+    labs(y = "Caseworker accuracy", x = "") +
+    labs(fill = "") +
+    theme_minimal() +
+    default_plot_conditions() +
+  theme(legend.position="none")
+
+effect_plt
+
+ggsave(str_glue("{outpath}/fig2a_passed.{filetype}"), dpi = 300, width=8, height=5, units='in')
+
+effect_plt_all <- produce_mod_df_output(lm_all, lm_all_cat) %>%
+  filter(!(model == "By chatbot quality" & term_label == "Control")) %>% 
+  mutate(model = if_else(model == 'Treatment only', 'Overall effect', 'By chatbot quality') %>% 
+           factor(levels = c("Overall effect", "By chatbot quality"))) %>% 
+    ggplot(aes(x = term_label, y = fit)) +
+    geom_col(aes(fill = if_else(term_label == 'Control', 'Control', 'Treatment')),
+            position = "dodge", width=0.9) +
+    geom_errorbar(aes(ymin = lwr, ymax = upr), position = position_dodge(width = .9), width = .15) +
+    geom_text(aes(y = upr+3, label = str_c(round(fit,1), "%")), 
+               position = position_dodge(width = .9)) +
+    scale_fill_manual(values=c(hex_codes[[2]], hex_codes[[1]])) +
+    scale_y_continuous(labels = function(x) paste0(x, "%")) +
+    labs(y = "Caseworker accuracy", x = "") +
+    geom_vline(aes(xintercept = 2.5), color='gray', linetype = "dotted", linewidth=1.5) +
+    labs(fill = "") +
+    theme_minimal() +
+    default_plot_conditions() +
+  theme(legend.position="none")
+effect_plt_all
+
+ggsave(str_glue("{outpath}/fig2a_all_participants.{filetype}"), dpi = 300, width=8, height=5, units='in')
+```
+
+## Figure 1b
+
+```{r, message=FALSE, echo=FALSE, fig.width=8, fig.height=6}
+compute_line_plot <- function(df) {
+    df %>%
+      summarize(
+        avg_accuracy = mean(respondent_accuracy),
+        sd_respondent_accuracy = sd(respondent_accuracy),
+        n = n()
+      ) %>%
+      mutate(
+        ci_low = avg_accuracy - (qt(0.975, df=n-1) * sd_respondent_accuracy / sqrt(n)),
+        ci_high = avg_accuracy + (qt(0.975, df = n-1) * sd_respondent_accuracy / sqrt(n))
+      ) %>%
+      ungroup() %>%
+      mutate(
+        num_correct = n_questions - as.numeric(num_incorrect),
+        true_accuracy = 100 * (num_correct / n_questions)
+      )
+}
+
+# data prep
+df_line_plt_prep <- df %>%
+  group_by(id, num_incorrect, passed_attention, experiment_type) %>%
+  summarize(respondent_accuracy = 100 * mean(respondent_correct)) %>%
+  ungroup()
+
+# version with all
+df_line_plt_all <- df_line_plt_prep %>%
+  group_by(num_incorrect) %>%
+  compute_line_plot()
+
+# version with just passed
+df_line_plt_passed <- df_line_plt_prep %>%
+  filter(passed_attention == "Passed attention") %>%
+  group_by(num_incorrect) %>%
+  compute_line_plot()
+
+# control all
+control_accuracy_all <- df_line_plt_prep %>%
+  filter(experiment_type == "control") %>%
+  summarize(avg_accuracy = mean(respondent_accuracy)) %>%
+  pull(avg_accuracy)
+
+# control passed
+control_accuracy_passed <- df_line_plt_prep %>%
+  filter(passed_attention == "Passed attention", experiment_type == "control") %>%
+  summarize(avg_accuracy = mean(respondent_accuracy)) %>%
+  pull(avg_accuracy)
+```
+
+```{r}
+# compute data frame with true values
+df_true <- df %>%
+  filter(passed_attention == "Passed attention") %>%
+  mutate(num_incorrect_label = if_else(is.na(num_incorrect), "control", as.character(num_incorrect)) %>%
+    factor(levels = c("control", 21:0), ordered = TRUE)) %>%
+  group_by(id, num_incorrect_label, num_incorrect) %>%
+  summarize(respondent_accuracy = 100 * mean(respondent_correct)) %>%
+  ungroup() %>%
+  distinct(num_incorrect_label, num_incorrect) %>%
+  mutate(true_accuracy = 100 * (n_questions - num_incorrect) / n_questions)
+
+df_line_plt_prep_X_difficulty <- df %>%
+  group_by(id, experiment_type, num_incorrect, passed_attention, difficulty_recoded) %>%
+  summarize(
+    respondent_accuracy = 100 * mean(respondent_correct),
+    true_accuracy_by_difficulty = 100 * mean(type == "correct")
+  ) %>%
+  ungroup()
+
+df_line_plt_X_difficulty_all <- df_line_plt_prep_X_difficulty %>%
+  group_by(num_incorrect, difficulty_recoded, experiment_type) %>%
+  compute_line_plot() %>%
+  mutate(difficulty_recoded = case_when(
+    difficulty_recoded == 1 ~ "Easy",
+    difficulty_recoded == 2 ~ "Medium",
+    TRUE ~ "Hard"
+  ) %>%
+    factor(levels = c("Easy", "Medium", "Hard")))
+
+df_line_plt_X_difficulty_passed <- df_line_plt_prep_X_difficulty %>%
+  filter(passed_attention == "Passed attention") %>%
+  group_by(num_incorrect, difficulty_recoded, experiment_type) %>%
+  compute_line_plot() %>%
+  mutate(difficulty_recoded = case_when(
+    difficulty_recoded == 1 ~ "Easy",
+    difficulty_recoded == 2 ~ "Medium",
+    TRUE ~ "Hard"
+  ) %>%
+    factor(levels = c("Easy", "Medium", "Hard")))
+```
+
+```{r}
+lineplot_all <- df_line_plt_all %>%
+  ggplot(aes(x = true_accuracy, avg_accuracy)) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), alpha = 0.2) +
+  geom_line(
+    data = df_true,
+    aes(true_accuracy, true_accuracy), color = hex_codes[["purple"]], alpha = 0.5
+  ) +
+  geom_line(color = "black") +
+  geom_hline(aes(yintercept = control_accuracy_all), linetype = "dashed") +
+  labs(
+    x = "",
+    y = "Caseworker accuracy"
+  ) +
+  theme_minimal() +
+  labs(x = "Chatbot accuracy") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(30, 100)) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  default_plot_conditions()
+lineplot_all
+ggsave(str_glue("{outpath}/fig2b_all_pct.{filetype}"), height = 6, width = 7, units = "in", dpi = 300)
+
+
+lineplot_passed <- df_line_plt_passed %>%
+  ggplot(aes(x = true_accuracy, avg_accuracy)) +
+  geom_ribbon(aes(ymin = ci_low, ymax = ci_high), alpha = 0.2) +
+  geom_line(
+    data = df_true,
+    aes(true_accuracy, true_accuracy), color = hex_codes[["purple"]], alpha = 0.5
+  ) +
+  geom_line(color = "black") +
+  geom_hline(aes(yintercept = control_accuracy_passed), linetype = "dashed") +
+  labs(
+    x = "",
+    y = "Caseworker accuracy"
+  ) +
+  theme_minimal() +
+  labs(x = "Chatbot accuracy") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(30, 100)) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  default_plot_conditions()
+
+lineplot_passed
+ggsave(str_glue("{outpath}/fig2b_pct.{filetype}"), height = 6, width = 7, units = "in", dpi = 300)
+```
+
+```{r}
+df_line_plt_prep %>%
+  filter(passed_attention == "Passed attention") %>%
+  filter(num_incorrect==0) %>% 
+  arrange(respondent_accuracy) %>% 
+  verify(experiment_type != 'control')
+
+df_line_plt_prep %>%
+      mutate(
+        num_correct = n_questions - as.numeric(num_incorrect),
+        true_accuracy = 100 * (num_correct / n_questions)
+      ) %>%
+  ggplot(aes(x = true_accuracy, respondent_accuracy)) +
+  geom_line(
+    data = df_true,
+    aes(true_accuracy, true_accuracy), color = hex_codes[["purple"]], alpha = 0.5
+  ) +
+  geom_smooth(aes(color=passed_attention), method='lm') +
+  geom_hline(data = . %>% 
+               filter(is.na(num_incorrect)) %>% 
+               group_by(passed_attention) %>% 
+               summarize(avg_accuracy = mean(respondent_accuracy)),
+             aes(yintercept = avg_accuracy, color = passed_attention), linetype = "dashed") +
+  labs(
+    x = "",
+    y = "Caseworker accuracy"
+  ) +
+  theme_minimal() +
+  labs(x = "Chatbot accuracy") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(30, 100)) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  scale_color_manual(values=c(hex_codes[[1]], hex_codes[[2]])) +
+  default_plot_conditions() +
+  labs(color = "") +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  )
+
+ggsave(str_glue("{outpath}/fig21.{filetype}"), height = 6, width = 7, units = "in", dpi = 300)
+```
+
+### Figure 9
+
+```{r, message=FALSE, echo=FALSE, fig.width=16, fig.height=6}
+produce_caseworker_accuracy_X_difficulty_plot <- function(df, df_2, filename) {
+  plt <- df %>%
+    filter(experiment_type != "control") %>%
+    mutate(difficulty_recoded = case_when(
+      difficulty_recoded == 1 ~ "Easy",
+      difficulty_recoded == 2 ~ "Medium",
+      TRUE ~ "Hard"
+    ) %>%
+      factor(levels = c("Easy", "Medium", "Hard"))) %>%
+    ggplot(aes(true_accuracy_by_difficulty, respondent_accuracy, color = difficulty_recoded, fill = difficulty_recoded)) +
+    geom_line(aes(true_accuracy_by_difficulty, true_accuracy_by_difficulty), color = "black") +
+    geom_smooth(method = "loess") +
+    geom_point() +
+    geom_hline(
+      data = df_2 %>%
+        filter(experiment_type == "control"),
+      aes(yintercept = avg_accuracy), linetype = "dashed"
+    ) +
+    facet_wrap(~difficulty_recoded, scales = "free_x") +
+    theme_minimal() +
+    labs(
+      y = "Caseworker accuracy",
+      x = "Chatbot accuracy by difficulty"
+    ) +
+    scale_color_manual(values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]])) +
+    scale_fill_manual(values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]])) +
+    labs(
+      fill = "", color = "",
+    ) +
+    default_plot_conditions() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+  print(plt)
+  ggsave(str_glue("{outpath}/{filename}"), height = 6, width = 16, units = "in", dpi = 300)
+}
+
+df_line_plt_prep_X_difficulty %>%
+  produce_caseworker_accuracy_X_difficulty_plot(df_line_plt_X_difficulty_all, str_glue("fig9_all.{filetype}"))
+
+df_line_plt_prep_X_difficulty %>%
+  filter(passed_attention == "Passed attention") %>%
+  produce_caseworker_accuracy_X_difficulty_plot(df_line_plt_X_difficulty_passed, str_glue("fig9_passed.{filetype}"))
+```
+
+
+```{r, fig.width=13, fig.height=5}
+# produce panel
+p_grid <- plot_grid(effect_plt, lineplot_passed, labels = c('A', 'B', 'C'))
+p_grid
+ggsave(str_glue("{outpath}/fig2_passed.{filetype}"), plot=p_grid, width=13, height=5, units='in', dpi=300)
+
+p_grid_all <- plot_grid(effect_plt_all, lineplot_all, labels = c('A', 'B', 'C'))
+p_grid_all
+ggsave(str_glue("{outpath}/fig2_all.{filetype}"), plot=p_grid_all, width=13, height=5, units='in', dpi=300)
+```
+
+# Figure 3
+
+## Figure 3: Accuracy by difficulty
+
+```{r}
+# prep data
+df_prep_plot2 <- df %>%
+  mutate(
+    experiment_label = case_when(
+      experiment_type == "control" ~ "Control",
+      num_incorrect %in% c(0, 1, 2) ~ "0-2 incorrect",
+      num_incorrect %in% c(3, 6, 9) ~ "3-9 incorrect",
+      num_incorrect %in% c(12, 15, 18, 21) ~ "12-21 incorrect",
+      TRUE ~ NA
+    ) %>%
+      factor(
+        levels = c("Control", "12-21 incorrect", "3-9 incorrect", "0-2 incorrect")
+      ),
+    years_experience = as.numeric(years_experience),
+    llm_incorrect = if_else(!is.na(type) & type == "incorrect", 1, 0),
+    llm_suggestion = if_else(experiment_type != "control", 1, 0),
+    difficulty_recoded = factor(difficulty_recoded)
+  ) %>%
+  # include those with an incorrect llm label
+  group_by(question_id) %>%
+  filter(max(llm_incorrect) == 1) %>%
+  ungroup()
+```
+
+
+```{r, fig.width=10, fig.height=6}
+# produce data for prediction
+pred_data1 <- expand_grid(llm_suggestion = c(0, 1), llm_incorrect = c(0, 1)) %>%
+  filter(!(llm_suggestion == 0 & llm_incorrect == 1))
+
+pred_data2 <- expand_grid(llm_suggestion = c(0, 1), llm_incorrect = c(0, 1), difficulty_recoded = c(1, 2, 3)) %>%
+  mutate(difficulty_recoded = factor(difficulty_recoded)) %>%
+  filter(!(llm_suggestion == 0 & llm_incorrect == 1))
+
+# generate simple diff model via linear model
+generate_simple_diff <- function(df) {
+  model_res <- lm(respondent_correct ~ llm_suggestion + llm_incorrect,
+    data = df
+  )
+}
+
+generate_simple_diff_Xdifficulty <- function(df) {
+  model_res <- lm(respondent_correct ~ difficulty_recoded * llm_suggestion + difficulty_recoded + difficulty_recoded * llm_incorrect,
+    data = df
+  )
+}
+
+plot_simple_diffXdifficulty <- function(model1, model2, pred_data1, pred_data2, filename) {
+  model1_pred <- model1 %>%
+    car::Predict(newdata = pred_data1, interval = "confidence", level = 0.95, vcov. = vcovCL(model1, type = "HC1", cluster = ~id)) %>%
+    cbind(pred_data1, .) %>%
+    mutate(difficulty_recoded = NA)
+
+  plt <- model2 %>%
+    # predict on new data
+    car::Predict(newdata = pred_data2, interval = "confidence", level = 0.95, vcov. = vcovCL(model2, type = "HC1", cluster = ~id)) %>%
+    cbind(pred_data2, .) %>%
+    bind_rows(model1_pred) %>%
+    mutate(
+      difficulty_label = case_when(
+        difficulty_recoded == 1 ~ "Easy",
+        difficulty_recoded == 2 ~ "Medium",
+        difficulty_recoded == 3 ~ "Hard",
+        TRUE ~ "Overall"
+      ) %>%
+        factor(levels = c("Overall", "Easy", "Medium", "Hard"), ordered = TRUE),
+      type = case_when(
+        llm_incorrect == 1 ~ "Incorrect",
+        llm_incorrect == 0 & llm_suggestion == 1 ~ "Correct",
+        llm_suggestion == 0 ~ "Control"
+      ),
+      typelabel = if_else(type != "Control", str_to_sentence(type) %>%
+        str_c(" chatbot suggestions"), type) %>%
+        factor(levels = c("Incorrect chatbot suggestions", "Control", "Correct chatbot suggestions"), ordered = TRUE)
+    ) %>% # plot
+    ggplot(aes(difficulty_label, fit, fill = typelabel)) +
+    geom_col(position = "dodge") +
+    geom_errorbar(aes(ymin = lwr, ymax = upr), position = position_dodge(width = .9), width = .15) +
+    geom_vline(xintercept = 1.5, color = "gray", linetype = "dotted", lwd = 2) +
+    geom_text(aes(y = upr + 0.05, label = str_glue("{round(100*fit,1)}%"), group = typelabel), position = position_dodge(width = .9), width = .15) +
+    scale_fill_manual(
+      values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]]),
+      guide = guide_legend(reverse = TRUE)
+    ) +
+    labs(y = "Question accuracy", x = "") +
+    scale_y_continuous(limits = c(0, 1.1), labels = function(x) paste0(100 * x, "%")) +
+    labs(fill = "") +
+    guides(fill = guide_legend(reverse = FALSE)) +
+    default_plot_conditions() +
+    theme(
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  print(plt)
+  ggsave(str_glue("{outpath}/{filename}"), height = 6, width = 16, units = "in", dpi = 300)
+}
+```
+
+**Passing attention check**
+
+```{r, fig.width=10, fig.height=6}
+lm_simple_diff <- generate_simple_diff(df_prep_plot2 %>%
+  filter(passed_attention == "Passed attention"))
+lm_simple_diff
+
+lm_simple_diff_Xdifficulty <- generate_simple_diff_Xdifficulty(df_prep_plot2 %>%
+  filter(passed_attention == "Passed attention"))
+
+lm_simple_diff %>%
+  car::Predict(newdata = pred_data1, interval = "confidence", level = 0.95, vcov. = vcovCL(lm_simple_diff, type='HC1', cluster=~id)) %>%
+  cbind(pred_data1, .)
+
+lm_simple_diff_Xdifficulty %>%
+  car::Predict(newdata = pred_data2, interval = "confidence", level = 0.95, vcov. = vcovCL(lm_simple_diff_Xdifficulty, type='HC1', cluster=~id)) %>%
+  cbind(pred_data2, .) %>%
+  mutate(type = case_when(
+    llm_incorrect == 1 ~ "Incorrect",
+    llm_incorrect == 0 & llm_suggestion == 1 ~ "Correct",
+    llm_suggestion == 0 ~ "Control"
+  )) %>%
+  select(-lwr, -upr, -llm_incorrect, -llm_suggestion) %>%
+  pivot_wider(names_from = "type", values_from = "fit") %>%
+  mutate(
+    diff_correct = Correct - Control,
+    diff_incorrect = Incorrect - Control
+  )
+
+plot_simple_diffXdifficulty(lm_simple_diff, lm_simple_diff_Xdifficulty, pred_data1, pred_data2, str_glue("fig3_passed.{filetype}"))
+```
+
+
+**Not passing attention check**
+
+```{r, fig.width=10, fig.height=6}
+lm_simple_diff <- generate_simple_diff(df_prep_plot2)
+lm_simple_diff
+
+lm_simple_diff_Xdifficulty <- generate_simple_diff_Xdifficulty(df_prep_plot2)
+
+lm_simple_diff %>%
+  car::Predict(newdata = pred_data1, interval = "confidence", level = 0.95, vcov. = vcovHC(lm_simple_diff, type='HC1')) %>%
+  cbind(pred_data1, .)
+
+lm_simple_diff_Xdifficulty %>%
+  car::Predict(newdata = pred_data2, interval = "confidence", level = 0.95, vcov. = vcovHC(lm_simple_diff_Xdifficulty, type='HC1')) %>%
+  cbind(pred_data2, .) %>%
+  mutate(type = case_when(
+    llm_incorrect == 1 ~ "Incorrect",
+    llm_incorrect == 0 & llm_suggestion == 1 ~ "Correct",
+    llm_suggestion == 0 ~ "Control"
+  )) %>%
+  select(-lwr, -upr, -llm_incorrect, -llm_suggestion) %>%
+  pivot_wider(names_from = "type", values_from = "fit") %>%
+  mutate(
+    diff_correct = Correct - Control,
+    diff_incorrect = Incorrect - Control
+  )
+
+plot_simple_diffXdifficulty(lm_simple_diff, lm_simple_diff_Xdifficulty, pred_data1, pred_data2, str_glue("fig3_all.{filetype}"))
+```
+
+# Figure 4
+
+## Duration by question position
+
+```{r}
+# compare duration to number of overall incorrect (median person-level duration compared to chatbot accuracy)
+median_question_duration_plot <- function(df, filename) {
+  plt <- df %>%
+    mutate(experiment_type = case_when(
+      experiment_type == "treatment" ~ "chatbot suggestion",
+      TRUE ~ "Control"
+    ) %>%
+      factor(levels = c("Control", "chatbot suggestion"))) %>%
+    group_by(question_order_num, experiment_type) %>%
+    summarize(
+      med_duration = quantile(duration/ 60, 0.5),
+      q_75 = quantile(duration/ 60, 0.75),
+      q_25 = quantile(duration/ 60, 0.25)
+    ) %>%
+    ungroup() %>%
+    ggplot(aes(question_order_num, med_duration, color = factor(experiment_type))) +
+    geom_point() +
+    geom_smooth() +
+    theme_minimal() +
+    scale_color_manual(values = c( hex_codes[[2]], hex_codes[[1]], hex_codes[[3]])) +
+    labs(
+      x = "Question position in assessment",
+      y = "Median question duration\n(minutes)",
+      color = ""
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 16),
+      axis.text.y = element_text(size = 14),
+      axis.text.x = element_text(size = 14),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  print(plt)
+  ggsave(str_glue("{outpath}/{filename}"), height = 6, width = 7, units = "in", dpi = 300)
+}
+
+df %>%
+  median_question_duration_plot(str_glue("fig4_all.{filetype}"))
+
+df %>%
+  filter(passed_attention == "Passed attention") %>%
+  median_question_duration_plot(str_glue("fig4_passed.{filetype}"))
+```
+
+# Table 1: treatment effects
+
+```{r}
+# formatted regression output
+stargazer(lm_all, lm_all_cat, type = 'text', se = map(list(lm_all, lm_all_cat), ~generate_robust_se(.)), 
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+
+# Tables 2-4
+
+```{r}
+df %>% 
+  distinct(question_id, set) %>% 
+  group_by(question_id) %>% 
+  summarize(n_set = n_distinct(set)) %>% 
+  ungroup() %>% 
+  summarize(avg_overlap = round(mean(n_set),2),
+            pct_gt_1 = round(mean(n_set > 1),2),
+            pct_all_4 = round(mean(n_set == 4),2),
+            n = n()) %>% 
+  select(n, avg_overlap, pct_gt_1, pct_all_4) %>% 
+  kable()
+
+df %>% 
+  distinct(question_id, set, gender, age, disability, citizenship, employment) %>% 
+  pivot_longer(-c("question_id", "set")) %>% 
+  group_by(name, value, set) %>% 
+  summarize(n_dist_q = n_distinct(question_id)) %>% 
+  pivot_wider(names_from = "set", values_from = "n_dist_q") %>% 
+  left_join(df %>% 
+    distinct(question_id, gender, age, disability, citizenship, employment) %>% 
+    pivot_longer(-c("question_id")) %>% 
+    group_by(name, value) %>% 
+    summarize(total = n_distinct(question_id)), .,  by=c("name", "value"))  %>% 
+  mutate(name = str_replace_all(name, "_", "") %>% 
+           str_to_sentence()) %>% 
+  kable()
+df %>% 
+  distinct(set, question_id, category) %>% 
+  group_by(set, category) %>% 
+  summarize(n = n()) %>% 
+  pivot_wider(names_from = "set", values_from = "n") %>% 
+  mutate(across(c("A", "B", "C", "D"), ~if_else(is.na(.), 0, .))) %>% 
+  left_join(df %>% 
+    distinct(question_id, category) %>% 
+    group_by(category) %>% 
+    summarize(total = n()), by="category") %>%
+  kable()
+```
+
+# Table 5
+
+```{r}
+generate_languagesummary <- function(df) {
+  df_resp <- df %>% 
+    distinct(id, languages) %>% 
+    filter(!is.na(languages)) %>% 
+    nrow()
+  
+  df %>% 
+    distinct(id, languages) %>% 
+    mutate(row_id = row_number()) %>% 
+    mutate(languages = str_split(languages, pattern=",")) %>% 
+    unnest() %>% 
+    filter(!is.na(languages)) %>% 
+    group_by(languages) %>% 
+    summarize(n = n()) %>% 
+    ungroup() %>% 
+    mutate(pct = round(100*n/df_resp,2)) %>% 
+    mutate(n_pct = str_glue("{n} ({pct})")) %>% 
+    select(languages, n_pct) 
+}
+
+df %>% 
+  filter(passed_attention == "Passed attention") %>%
+  generate_languagesummary() %>% 
+  left_join(generate_languagesummary(df), ., by="languages", suffix=c("_all", "_passed")) %>% 
+  kable()
+```
+
+# Table 6
+
+```{r}
+continuous_vars <- c("cumulative_experienc", "accuracy_perception", "often_use", "years_experience")
+continuous_var_labels <- c("Cumulative experience", "Perception of accuracy", "Often use", "Years experience")
+
+create_descriptive_table <- function(df, continuous_vars, continuous_var_labels) {
+  tbl <- df %>%
+    select(continuous_vars, id) %>%
+    distinct() %>% 
+    mutate(across(continuous_vars, ~ as.numeric(.))) %>%
+    summarize(across(continuous_vars, .fns = lst( # min = ~min(., na.rm = TRUE),
+      p25 = ~ quantile(., 0.25, na.rm = TRUE),
+      median = ~ quantile(., 0.5, na.rm = TRUE),
+      p75 = ~ quantile(., 0.75, na.rm = TRUE),
+      mean = ~ mean(., na.rm = TRUE),
+      sd = ~ sd(., na.rm = TRUE),
+      n = ~ sum(!is.na(.))
+    ))) %>%
+    # max = ~max(., na.rm = TRUE)))) %>%
+    pivot_longer(everything()) %>%
+    mutate(
+      type = str_extract(name, "(?<=_)[a-z0-9]+$"),
+      name = str_replace(name, str_c("_", type), "")
+    ) %>%
+    pivot_wider(names_from = "type", values_from = "value") %>%
+    mutate(label = continuous_var_labels[match(name, continuous_vars)]) %>%
+    mutate(
+      conf_lwr = round(mean - qt(0.975, df= n-1) * sd / sqrt(n), 2),
+      conf_upr = round(mean + qt(0.975, df= n-1) * sd / sqrt(n), 2),
+      median_form = str_glue("{median}\n({p25}-{p75})"),
+      mean_form = str_glue("{round(mean, 2)}\n({conf_lwr}-{conf_upr})")
+    ) %>%
+    select(label, median_form, mean_form)
+
+  return(tbl)
+}
+
+df %>%
+  filter(passed_attention == "Passed attention") %>%
+  create_descriptive_table(continuous_vars, continuous_var_labels) %>%
+  full_join(create_descriptive_table(df, continuous_vars, continuous_var_labels), ., by = "label", suffix = c("_all", "_passed"))
+```
+
+# Table 7
+
+```{r}
+produce_desc_table <- function(df, varname, varname_text, varlabel, by_attention = TRUE) {
+  multicol_formatting <- c(5)
+  names(multicol_formatting) <- varlabel
+  varname_ <- enquo(varname)
+
+  
+  if (by_attention == TRUE) {
+    df1 <- df %>% 
+      select(id, varname_text) %>% 
+      distinct()
+    
+    df2 <- df %>% 
+      filter(passed_attention == "Passed attention") %>% 
+      select(id, varname_text) %>%
+      distinct() 
+  } else {
+    df1 <- df %>%
+      filter(experiment_type == 'treatment')  %>% 
+      select(id, varname_text) %>% 
+      distinct()
+    
+    df2 <- df %>% 
+      filter(experiment_type == 'control')  %>% 
+      select(id, varname_text) %>% 
+      distinct()
+  }
+  
+  df1 <- df1 %>%
+    filter(!is.na(!!varname_)) %>%
+    group_by(!!varname_) %>%
+    summarize(n = n()) %>%
+    left_join(df %>%
+      filter(!is.na(!!varname_)) %>%
+      distinct(!!varname_) %>%
+      arrange(!!varname_), .) %>%
+    mutate(n = if_else(is.na(n), 0, n)) %>%
+    ungroup() %>%
+    mutate(pct = round(100 * n / sum(n), 2)) %>%
+    mutate(res = str_glue("{n} ({pct}%)")) %>%
+    select(!!varname_, res)
+
+  df2 <- df2 %>%
+    filter(!is.na(!!varname_)) %>%
+    group_by(!!varname_) %>%
+    summarize(n = n()) %>%
+    left_join(df %>%
+      filter(!is.na(!!varname_)) %>%
+      distinct(!!varname_) %>%
+      arrange(!!varname_), .) %>%
+    mutate(n = if_else(is.na(n), 0, n)) %>%
+    ungroup() %>%
+    arrange(!!varname_) %>%
+    mutate(pct = round(100 * n / sum(n), 2)) %>%
+    mutate(res = str_glue("{n} ({pct}%)")) %>%
+    select(!!varname_, res) %>%
+    mutate(lab = varlabel)
+
+  tbl <- df2 %>%
+    full_join(df1, ., by = varname_text, suffix = c("", "_all")) %>%
+    select(lab, everything()) %>%
+    knitr::kable() %>%
+    kableExtra::collapse_rows(columns = 1, latex_hline = "major")
+
+  return(tbl)
+}
+
+produce_desc_table(df, calfresh_prog_know, "calfresh_prog_know", "Program Knowledge of CalFresh")
+produce_desc_table(df, existing_chatbot_use, "existing_chatbot_use", "Existing Chatbot Use")
+produce_desc_table(df, base_chatbot_benharm, "base_chatbot_benharm", "Whether chatbots are beneficial or harmful")
+produce_desc_table(df, base_chatbot_views, "base_chatbot_views", "Views on chatbots")
+produce_desc_table(df, learning_questions, "learning_questions", "How easy or difficult to find answers to questions")
+produce_desc_table(df, often_difficulty_qs, "often_difficulty_qs", "How often you run into questions that you do not know the answer to")
+produce_desc_table(df, sources_google, "sources_google", "How often do you use: Google")
+produce_desc_table(df, sources_slack_email, "sources_slack_email", "How often do you use: Slack/Email")
+produce_desc_table(df, sources_manuals_resources, "sources_manuals_resources", "How often do you use: Policy Manuals")
+produce_desc_table(df, sources_chatbots, "sources_chatbots", "How often do you use: Chatbots")
+produce_desc_table(df, sources_in_person, "sources_in_person", "How often do you use: In Person")
+produce_desc_table(df, other_sources_freq_8, "other_sources_freq_8", "How often do you use: Phone")
+produce_desc_table(df, compliance_effort, "compliance_effort", "Mental Effort")
+produce_desc_table(df, difficulty_questions, "difficulty_questions", "Familiarity with questions")
+produce_desc_table(df, helpful_perception, "helpful_perception", "Perception of chatbot helpfulness")
+produce_desc_table(df, interested_everyday, "interested_everyday", "Interested in using chatbot")
+```
+
+
+# Tables 8-9:
+
+Baseline equivalence tests
+
+```{r}
+baseline_vars <- c("years_experience", "languages_notenglish",
+                   "calfresh_prog_know", "existing_chatbot_use",
+         "base_chatbot_benharm", "base_chatbot_views", "learning_questions", "often_difficulty_qs", 
+         "sources_google", "sources_slack_email", "sources_manuals_resources",
+         "sources_chatbots", "sources_in_person", "other_sources_freq_8")
+
+df_bequiv <- df %>% 
+  mutate(languages_notenglish = if_else(languages != 'No', 1, 0),
+         experiment_type = if_else(is.na(experiment_type), 'control', experiment_type)) %>% 
+  select(baseline_vars, experiment_type, id) %>% 
+  distinct()
+
+# use linear models and chi-squared tests for independence
+run_bequiv <- function(out, df) {
+  mod <- lm(as.formula(str_glue("{out} ~ experiment_type")), data = df)
+  return(summary(mod)$coefficients[2,4])
+}
+
+run_chisquared <- function(var, df) {
+  df %>% 
+    rename(tmp_var = var) %>% 
+    group_by(experiment_type) %>% 
+    count(tmp_var) %>% 
+    filter(!is.na(tmp_var)) %>% 
+    pivot_wider(names_from = c("tmp_var"), values_from = "n", values_fill = 0) %>%
+    ungroup() %>%
+    select(-experiment_type) %>% 
+    as.matrix() %>% 
+    chisq.test() %>% 
+    print()
+}
+
+
+df_bequiv %>% 
+  group_by(experiment_type) %>% 
+  summarize(across(c(years_experience, languages_notenglish), ~mean(., na.rm = TRUE))) %>% 
+  mutate(languages_notenglish = 100*languages_notenglish) %>% 
+  pivot_longer(baseline_vars[1:2]) %>% 
+  mutate(value = round(value, 2)) %>% 
+  pivot_wider(names_from = c("experiment_type"), values_from = "value") %>% 
+  select(name, treatment, control) %>% 
+  kable()
+
+bequiv_pvals <- map(baseline_vars[1:2], ~run_bequiv(., df_bequiv)) %>% 
+  unlist()
+walk(baseline_vars[3:length(baseline_vars)], ~run_chisquared(., df_bequiv))
+
+produce_desc_table(df, calfresh_prog_know, "calfresh_prog_know", "Program Knowledge of CalFresh", by_attention = FALSE)
+produce_desc_table(df, existing_chatbot_use, "existing_chatbot_use", "Existing Chatbot Use", by_attention = FALSE)
+produce_desc_table(df, base_chatbot_benharm, "base_chatbot_benharm", "Whether chatbots are beneficial or harmful", by_attention = FALSE)
+produce_desc_table(df, base_chatbot_views, "base_chatbot_views", "Views on chatbots", by_attention = FALSE)
+produce_desc_table(df, learning_questions, "learning_questions", "How easy or difficult to find answers to questions", by_attention = FALSE)
+produce_desc_table(df, often_difficulty_qs, "often_difficulty_qs", "How often you run into questions that you do not know the answer to", by_attention = FALSE)
+produce_desc_table(df, sources_google, "sources_google", "How often do you use: Google", by_attention = FALSE)
+produce_desc_table(df, sources_slack_email, "sources_slack_email", "How often do you use: Slack/Email", by_attention = FALSE)
+produce_desc_table(df, sources_manuals_resources, "sources_manuals_resources", "How often do you use: Policy Manuals", by_attention = FALSE)
+produce_desc_table(df, sources_chatbots, "sources_chatbots", "How often do you use: Chatbots", by_attention = FALSE)
+produce_desc_table(df, sources_in_person, "sources_in_person", "How often do you use: In Person", by_attention = FALSE)
+produce_desc_table(df, other_sources_freq_8, "other_sources_freq_8", "How often do you use: Phone", by_attention = FALSE)
+```
+
+# Figures 10-11
+
+```{r}
+generate_demo_varying_plot <- function(df, varname, use_linear_mod=FALSE) {
+  demo_var <- enquo(varname)
+  ids_varying <- df %>%
+    distinct(question_id, !!demo_var) %>%
+    group_by(question_id) %>%
+    filter(n() > 1) %>%
+    pull(question_id)
+
+  df_varying <- df %>%
+      mutate(type = if_else(is.na(type), "control", type)) %>%
+      filter(
+        question_id %in% ids_varying
+      ) %>% 
+    group_by(
+      type,
+      !!demo_var
+    ) %>%
+    summarize(
+      respondent_accuracy = mean(respondent_correct),
+      respondent_ci_low = respondent_accuracy - qt(0.975, df=n() - 1) * sd(respondent_correct) / sqrt(n()),
+      respondent_ci_high = respondent_accuracy + qt(0.975, df = n()-1) * sd(respondent_correct) / sqrt(n()),
+      n = n()
+    ) %>%
+    mutate(across(c(respondent_accuracy, respondent_ci_low, respondent_ci_high), ~ 100 * .)) %>%
+    mutate(respondent_ci_width = respondent_ci_high - respondent_ci_low) %>%
+    ungroup()
+
+  return(df_varying)
+}
+
+plot_demo_varying <- function(df, varname, filename) {
+  demo_var <- enquo(varname)
+  plt <- df %>%
+    mutate(question_typedetailed = case_when(
+      type == "control" ~ "Control",
+      type == "correct" ~ "Correct chatbot suggestion",
+      type == "incorrect" ~ "Incorrect chatbot suggestion"
+    ) %>%
+      factor(levels = c("Incorrect chatbot suggestion", "Control", "Correct chatbot suggestion"), ordered = TRUE)) %>%
+    ggplot(aes(question_typedetailed, respondent_accuracy, fill = !!demo_var)) +
+    default_question_plot +
+    scale_y_continuous(limits = c(0, 100), labels = function(x) paste0(x, "%"))
+
+  print(plt)
+  ggsave(str_glue("{outpath}/{filename}"), width = 8, height = 4, units = "in", dpi = 300)
+}
+
+generate_demo_varying_plot(df %>% 
+                             filter(!(question_id %in% c(7,9))), gender) %>%
+  plot_demo_varying(gender, str_glue("fig10a_all.{filetype}"))
+
+
+generate_demo_varying_plot(df, age) %>%
+  plot_demo_varying(age, str_glue("fig10b_all.{filetype}"))
+
+df %>%
+  filter(passed_attention == "Passed attention") %>% 
+                             filter(!(question_id %in% c(7,9))) %>%
+  generate_demo_varying_plot(gender) %>%
+  plot_demo_varying(gender, str_glue("fig10a_passed.{filetype}"))
+
+df %>%
+  filter(passed_attention == "Passed attention") %>%
+  generate_demo_varying_plot(age) %>%
+  plot_demo_varying(age, str_glue("fig10b_passed.{filetype}"))
+```
+
+# Figure 11
+
+```{r, fig.width=12, fig.height=5}
+generate_data_preamble_changes <- function(df) {
+  df %>%
+    mutate(preamble_changes = if_else(question_id >= 250, "Answer depends on client attributes", "Answer does not depend on client attributes") %>%
+      factor(levels = c("Answer does not depend on client attributes", "Answer depends on client attributes"))) %>%
+    group_by(preamble_changes, type) %>%
+    summarize(
+      respondent_accuracy = mean(respondent_correct),
+      respondent_ci_low = respondent_accuracy - qt(0.975, df= n()-1) * sd(respondent_correct) / sqrt(n()),
+      respondent_ci_high = respondent_accuracy + qt(0.975, df= n()-1) * sd(respondent_correct) / sqrt(n()),
+      n = n()
+    ) %>%
+    mutate(across(c(respondent_accuracy, respondent_ci_low, respondent_ci_high), ~ 100 * .)) %>%
+    mutate(respondent_ci_width = respondent_ci_high - respondent_ci_low) %>%
+    mutate(question_typedetailed = case_when(
+      is.na(type) ~ "Control",
+      type == "correct" ~ "Correct chatbot suggestion",
+      type == "incorrect" ~ "Incorrect chatbot suggestion"
+    ) %>%
+      factor(levels = c("Incorrect chatbot suggestion", "Control", "Correct chatbot suggestion"), ordered = TRUE))
+}
+
+plot_preamble_changes <- function(df, filename, lower_limit) {
+  plt <- df %>%
+    ggplot(aes(question_typedetailed, respondent_accuracy, fill = preamble_changes)) +
+    default_question_plot +
+    scale_y_continuous(limits = c(lower_limit, 100), labels = function(x) paste0(x, "%"))
+
+  print(plt)
+  ggsave(str_glue("{outpath}/{filename}"), width = 8, height = 4, units = "in", dpi = 300)
+}
+
+df_preamble_changes <- df %>%
+  mutate(preamble_changes = if_else(question_id >= 250, "Answer depends on client attributes", "Answer does not depend\non client attributes") %>%
+    factor(levels = c("Answer does not depend\non client attributes", "Answer depends on client attributes"))) %>%
+  mutate(type = if_else(is.na(type), "control", type))
+
+df %>%
+  generate_data_preamble_changes() %>%
+  plot_preamble_changes(str_glue("fig11_all.{filetype}"), 0)
+
+df %>%
+  filter(passed_attention == "Passed attention") %>%
+  generate_data_preamble_changes() %>%
+  plot_preamble_changes(str_glue("fig11_passed.{filetype}"), -5)
+```
+
+# Figures 13-14
+
+```{r}
+produce_agreement_summary <- function(df) {
+  df %>%
+  # calculate total number of incorrect, correct suggestions + number of acceptances
+  summarize(
+    total_incorrect = sum(type == "incorrect"),
+    total_correct = sum(type == "correct"),
+    total_accept = sum(accept_suggestion),
+    total_accept_correct = sum(accept_suggestion == 1 & type == "correct"),
+    total_accept_incorrect = sum(accept_suggestion == 1 & type == "incorrect"),
+    total = n()
+  ) %>% 
+  verify(total == 15) %>%
+  mutate(accuracy_levels = case_when(
+    total_incorrect <= 1 ~ "High  (1 incorrect or less)",
+    total_incorrect <= 4 ~ "Medium (2-4 incorrect)",
+    total_incorrect <= 8 ~ "Low (5-8 incorrect)",
+    TRUE ~ NA
+  ) %>%
+    factor(levels = c("Low (5-8 incorrect)", "Medium (2-4 incorrect)", "High  (1 incorrect or less)"))) %>%
+  mutate(
+    total_accept_correct_normalized = total_accept_correct / total_correct,
+    total_accept_incorrect_normalized = total_accept_incorrect / total_incorrect,
+    total_accept_pct = total_accept / total
+  )
+}
+
+compute_agreement_stats <- function(df) {
+  df <- df  %>% 
+    pivot_longer(c(total_accept_pct, total_accept_incorrect_normalized, total_accept_correct_normalized)) %>%
+    filter(!is.na(value)) %>% 
+    group_by(question_position_cat, accuracy_levels, name) %>% 
+    summarize(avg = mean(value),
+              error = qt(0.975, df = n() - 1) * sd(value) / sqrt(n())) %>% 
+    mutate(conf_lower = avg - error,
+           conf_upper = avg + error)
+  return(df)
+}
+
+df_agreements <- df %>%
+  mutate(question_position_cat = case_when(
+    question_order_num <= n_questions_per_difficulty ~ "Beginning",
+    question_order_num <= n_questions - n_questions_per_difficulty ~ "Middle",
+    question_order_num <= n_questions ~ "End"
+  ) %>%
+    factor(levels = c("Beginning", "Middle", "End"))) %>%
+  filter(experiment_type != "control") %>%
+  mutate(num_incorrect = as.numeric(num_incorrect)) %>%
+  mutate(has_incorrect = if_else(type == "incorrect", "Incorrect", "Correct")) %>%
+  mutate(accept_suggestion = case_when(
+    has_incorrect == "Incorrect" & respondent_correct == 0 ~ 1,
+    has_incorrect == "Correct" & respondent_correct == 1 ~ 1,
+    TRUE ~ 0
+  )) %>%
+  group_by(id) %>%
+  arrange(question_order_num) %>%
+  group_by(question_position_cat, id, passed_attention) %>% 
+  produce_agreement_summary()
+
+df_agreements_passed <- df_agreements %>%
+  filter(passed_attention == "Passed attention") %>%  
+  compute_agreement_stats()
+    
+df_agreements <- df_agreements  %>% 
+  compute_agreement_stats()
+```
+
+```{r}
+df_agreements %>%
+  filter(name == 'total_accept_pct') %>% 
+  ggplot(aes(question_position_cat, avg)) +
+  geom_point(size = 7) +
+  geom_errorbar(aes(ymin = conf_lower, ymax = conf_upper), width=0.5) +
+  facet_wrap(~accuracy_levels) +
+  labs(x = "", y = "Agreement rate") +
+  scale_y_continuous(limits = c(0.6, 1)) +
+  default_plot_conditions()
+
+ggsave(str_glue("{outpath}/fig13_all.{filetype}"), height = 6, width = 16, units = "in", dpi = 300)
+
+df_agreements_passed %>%
+  filter(name == 'total_accept_pct') %>% 
+  ggplot(aes(question_position_cat, avg)) +
+  geom_point(size = 7) +
+  geom_errorbar(aes(ymin = conf_lower, ymax = conf_upper), width=0.5) +
+  facet_wrap(~accuracy_levels) +
+  labs(x = "", y = "Agreement rate") +
+  scale_y_continuous(limits = c(0.6, 1)) +
+  default_plot_conditions()
+
+ggsave(str_glue("{outpath}/fig13_passed.{filetype}"), height = 6, width = 16, units = "in", dpi = 300)
+```
+
+```{r}
+df_agreements %>%
+  filter(name != 'total_accept_pct') %>% 
+  mutate(name_type = if_else(str_detect(name, "_incorrect"), "Incorrect suggestion", "Correct suggestion")) %>%
+  ggplot(aes(question_position_cat, avg)) +
+  geom_point(size = 5) +
+  geom_errorbar(aes(ymin = conf_lower, ymax = conf_upper), width=0.5) +
+  facet_grid(cols = vars(accuracy_levels), rows = vars(name_type)) +
+  labs(x = "", y = "Agreement rate") +
+  scale_y_continuous(limits=c(0.5, 1)) +
+  default_plot_conditions()
+
+ggsave(str_glue("{outpath}/fig14.{filetype}"), height = 8, width = 16, units = "in", dpi = 300)
+
+# note: fixed a sample size issue that affects the "High (1 incorrect or less)" X "Incorrect suggestion" facet
+df_agreements_passed %>%
+  filter(name != 'total_accept_pct') %>% 
+  mutate(name_type = if_else(str_detect(name, "_incorrect"), "Incorrect suggestion", "Correct suggestion")) %>%
+  ggplot(aes(question_position_cat, avg)) +
+  geom_point(size = 5) +
+  geom_errorbar(aes(ymin = conf_lower, ymax = conf_upper), width=0.5) +
+  facet_grid(cols = vars(accuracy_levels), rows = vars(name_type)) +
+  labs(x = "", y = "Agreement rate") +
+  scale_y_continuous(limits=c(0.4, 1.05)) +
+  default_plot_conditions()
+
+ggsave(str_glue("{outpath}/fig14_passed.{filetype}"), height = 8, width = 16, units = "in", dpi = 300)
+```
+
+# Figure 15
+
+```{r}
+df_agreements_cumulative <- df %>%
+  mutate(question_position_cat = case_when(
+    question_order_num <= n_questions_per_difficulty ~ "Beginning",
+    question_order_num <= n_questions - n_questions_per_difficulty ~ "Middle",
+    question_order_num <= n_questions ~ "End"
+  ) %>%
+    factor(levels = c("Beginning", "Middle", "End"))) %>%
+  filter(experiment_type != "control") %>%
+  mutate(num_incorrect = as.numeric(num_incorrect)) %>%
+  mutate(has_incorrect = if_else(type == "incorrect", "Incorrect", "Correct")) %>%
+  mutate(accept_suggestion = case_when(
+    has_incorrect == "Incorrect" & respondent_correct == 0 ~ 1,
+    has_incorrect == "Correct" & respondent_correct == 1 ~ 1,
+    TRUE ~ 0
+  )) %>%
+  group_by(id) %>%
+  arrange(question_order_num) %>%
+  mutate(
+    cumulative_incorrect = cumsum(type == "incorrect"),
+    cumulative_correct = cumsum(type == "correct"),
+    cumulative_accept = cumsum(accept_suggestion)
+  ) %>%
+  # note: an earlier version did not use the dplyr version of lag
+  mutate(cumulative_accept_rate = dplyr::lag(cumulative_accept/ question_order_num, n=1, order_by = question_order_num)) %>%
+  filter(question_order_num > 5) %>%
+  mutate(cumulative_accept_type = case_when(
+    cumulative_accept_rate <= 0.5 ~ "Low",
+    cumulative_accept_rate <= 0.75 ~ "Medium",
+    cumulative_accept_rate <= 1 ~ "High"
+  ) %>%
+    factor(levels = c("Low", "Medium", "High")))
+
+df_agreements_cumulative %>%
+  mutate(experiment_label = case_when(
+    experiment_type == "control" ~ "Control",
+    num_incorrect %in% c(0, 1, 2) ~ "High\n96-100% accurate",
+    num_incorrect %in% c(3, 6, 9) ~ "Medium\n80-93% accurate",
+    num_incorrect %in% c(12, 15, 18, 21) ~ "Low\n53-73% accurate",
+    TRUE ~ NA
+  ) %>%
+    factor(
+      levels = c("Control", "Low\n53-73% accurate", "Medium\n80-93% accurate", "High\n96-100% accurate")
+    )) %>%
+  ggplot(aes(cumulative_accept_rate, accept_suggestion)) +
+  geom_smooth(aes(group = experiment_label, color = experiment_label),
+    method = "glm",
+    method.args = list(family = binomial(link = "logit"))
+  ) +
+  scale_color_manual(values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]])) +
+  labs(
+    y = "Probability of agreement",
+    x = "Prior agreement rate",
+    color = "Chatbot type"
+  ) +
+  default_plot_conditions() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  scale_x_continuous(limits = c(0, 1), labels = function(x) paste0(x * 100, "%")) +
+  scale_y_continuous(limits = c(0, 1), labels = function(x) paste0(x * 100, "%"))
+
+ggsave(str_glue("{outpath}/fig15_all.{filetype}"), width = 9, height = 6, units = "in", dpi = 300)
+
+df_agreements_cumulative %>%
+  filter(passed_attention == "Passed attention") %>% 
+  mutate(experiment_label = case_when(
+    experiment_type == "control" ~ "Control",
+    num_incorrect %in% c(0, 1, 2) ~ "High\n96-100% accurate",
+    num_incorrect %in% c(3, 6, 9) ~ "Medium\n80-93% accurate",
+    num_incorrect %in% c(12, 15, 18, 21) ~ "Low\n53-73% accurate",
+    TRUE ~ NA
+  ) %>%
+    factor(
+      levels = c("Control", "Low\n53-73% accurate", "Medium\n80-93% accurate", "High\n96-100% accurate")
+    )) %>%
+  ggplot(aes(cumulative_accept_rate, accept_suggestion)) +
+  geom_smooth(aes(group = experiment_label, color = experiment_label),
+    method = "glm",
+    method.args = list(family = binomial(link = "logit"))
+  ) +
+  scale_color_manual(values = c(hex_codes[[1]], hex_codes[[2]], hex_codes[[3]])) +
+  labs(
+    y = "Probability of agreement",
+    x = "Prior agreement rate",
+    color = "Chatbot type"
+  ) +
+  default_plot_conditions() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal"
+  ) +
+  scale_x_continuous(limits = c(0, 1), labels = function(x) paste0(x * 100, "%")) +
+  scale_y_continuous(limits = c(0, 1), labels = function(x) paste0(x * 100, "%"))
+
+ggsave(str_glue("{outpath}/fig15_passed.{filetype}"), width = 9, height = 6, units = "in", dpi = 300)
+```
+
+# Figure 16: accuracy by question position
+
+```{r}
+accuracy_question_position_plot <- function(df, filename) {
+  plt <- df %>%
+    mutate(experiment_type = case_when(
+      experiment_type == "treatment" ~ "chatbot suggestion",
+      TRUE ~ "Control"
+    ) %>%
+      factor(levels = c("Control", "chatbot suggestion"))) %>%
+    group_by(question_order_num, experiment_type) %>%
+    summarize(
+      pct_accurate = 100*mean(respondent_correct)
+    ) %>%
+    ungroup() %>%
+    ggplot(aes(question_order_num, pct_accurate, color = factor(experiment_type))) +
+    geom_point() +
+    geom_smooth() +
+    theme_minimal() +
+    scale_y_continuous(limits=c(0,100)) +
+    scale_color_manual(values = c( hex_codes[[2]], hex_codes[[1]], hex_codes[[3]])) +
+    labs(
+      x = "Question position in assessment",
+      y = "Average question-level accuracy",
+      color = ""
+    ) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 16),
+      axis.text.y = element_text(size = 14),
+      axis.text.x = element_text(size = 14),
+      legend.position = "bottom",
+      legend.direction = "horizontal"
+    )
+
+  ggsave(str_glue("{outpath}/{filename}"), height = 6, width = 7, units = "in", dpi = 300)
+}
+
+df %>%
+  accuracy_question_position_plot(str_glue("fig16_all.{filetype}"))
+
+df %>%
+  filter(passed_attention == "Passed attention") %>%
+  accuracy_question_position_plot(str_glue("fig16_passed.{filetype}"))
+```
+
+# Figure 17
+
+```{r}
+# check correlation
+df_accuracy_comparison <- df %>%
+  distinct(id, accuracy_perception, num_incorrect, passed_attention) %>%
+  mutate(chatbot_accuracy = 100*(n_questions - num_incorrect) / n_questions) %>%
+  filter(!is.na(accuracy_perception)) 
+
+rho <- df_accuracy_comparison %>%
+  select(-c(passed_attention, id)) %>% 
+  cor()
+
+rho_passed <- df_accuracy_comparison %>%
+  filter(passed_attention == "Passed attention") %>% 
+  select(-c(passed_attention, id)) %>% 
+  cor()
+
+df_accuracy_comparison %>% 
+  ggplot(aes(chatbot_accuracy, accuracy_perception)) +
+  geom_point(color=hex_codes[[1]], size=2) +
+  geom_smooth(method='lm', color=hex_codes[[1]]) +
+  geom_label(aes(x=55, y=10, label = str_glue("rho={round(rho[3],2)}")), size=5) +
+  default_plot_conditions() +
+  labs(x="Actual chatbot accuracy", y="Perception of accuracy")
+
+ggsave(str_glue("{outpath}/fig17_all.{filetype}"), height = 6, width = 7, units = "in", dpi = 300)
+
+df_accuracy_comparison %>%
+  filter(passed_attention == "Passed attention") %>% 
+  ggplot(aes(chatbot_accuracy, accuracy_perception)) +
+  geom_point(color=hex_codes[[1]], size=2) +
+  geom_smooth(method='lm', color=hex_codes[[1]]) +
+  geom_label(aes(x=55, y=10, label = str_glue("rho={round(rho_passed[3],2)}")), size=5) +
+  default_plot_conditions() +
+  labs(x="Actual chatbot accuracy", y="Perception of accuracy")
+
+ggsave(str_glue("{outpath}/fig17_passed.{filetype}"), height = 6, width = 7, units = "in", dpi = 300)
+```
+
+# Regression Tables
+## Tables 15-20
+
+
+```{r}
+generate_question_level_res <- function(df, output_type='text') {
+  form_str <- "respondent_correct ~ llm_incorrect + llm_correct + chatbot_accuracy + difficulty_recoded + difficulty_recoded * llm_correct + difficulty_recoded * llm_incorrect"
+  form <- as.formula(form_str)
+  
+  # Overall linear models
+  lm_mod_overall <- lm(form,
+    data = df,
+  )
+  
+  lm_mod_simple <- lm(respondent_correct ~ llm_incorrect + llm_correct,
+    data = df,
+  )
+  
+  # (1) RE
+  plm_re <- plm(form,
+    data = df, index = c("id"), model="random")
+  
+  # (2) Question RE
+  
+  plm_q_re <- plm(form,
+    data = df, index = c("question_id"), model="random")
+  
+  lmer_overall <- lmer(as.formula(str_c(form_str, " + 1 + (1 | question_id) +  (1 | id)")), 
+    data = df)
+  
+  stargazer(lm_mod_simple, lm_mod_overall, plm_re, plm_q_re, lmer_overall, type=output_type, se = list(generate_cluster_se(lm_mod_simple), 
+                                                                                                                        generate_cluster_se(lm_mod_overall), 
+                                                                                                                        generate_cluster_se_plm(plm_re), generate_cluster_se_plm(plm_q_re),
+                                                                                                       generate_cluster_se_plm(plm_q_re), NULL), 
+          star.cutoffs = c(0.05, 0.01, 0.001)) %>% 
+    cat()
+}
+```
+
+### Simple linear models
+
+```{r}
+df_prep_models <- df %>% 
+  mutate(
+    num_incorrect = if_else(is.na(num_incorrect), 0, num_incorrect),
+    years_experience = as.numeric(years_experience),
+    llm_incorrect = if_else(type == "incorrect" & !is.na(type), 1, 0),
+    llm_correct = if_else(type == "correct" & !is.na(type), 1, 0),
+    llm_suggestion = if_else(experiment_type != "control", 1, 0),
+    difficulty_recoded = factor(difficulty_recoded)) %>% 
+  mutate(chatbot_accuracy = 100*(n_questions - num_incorrect)/n_questions)
+
+df_incorrect_only <- df_prep_models %>% 
+    group_by(question_id) %>% 
+    filter(max(type %in% c('incorrect'))==TRUE) %>% 
+    ungroup()
+
+generate_question_level_res(df_prep_models, 'text')
+generate_question_level_res(df_incorrect_only, 'text')
+generate_question_level_res(df_incorrect_only %>% 
+                              filter(passed_attention == "Passed attention"), 'text')
+```
+
+### Generalized linear models
+
+```{r}
+generate_question_level_res_binary <- function(df, output_type='text') {
+  form_str <- "respondent_correct ~ llm_incorrect + llm_correct + experiment_type:chatbot_accuracy + difficulty_recoded + difficulty_recoded * llm_correct + difficulty_recoded * llm_incorrect"
+  form <- as.formula(form_str)
+  
+  
+  # Overall linear models
+  glm_mod_overall <- glm(form,
+    data = df, family = binomial(link="logit")
+  )
+  
+  glm_mod_simple <- glm(respondent_correct ~ llm_incorrect + llm_correct,
+    data = df, family = binomial(link="logit")
+  )
+  
+  # (1) Person RE
+  pglm_re <- glmer(as.formula(str_c(form_str,  "+ 1 + (1 | id)")), 
+    data = df, family = binomial(link="logit"))
+  
+  # (2) Question RE
+  pglm_q_re <- glmer(as.formula(str_c(form_str,  "+ 1 + (1 | question_id)")), 
+    data = df, family = binomial(link="logit"))
+  
+  glmer_overall <- glmer(as.formula(str_c(form_str,  "+ 1 + (1 | question_id) +  (1 | id)")), 
+    data = df, family = binomial(link="logit"))
+  
+  stargazer(glm_mod_simple, glm_mod_overall, pglm_re, pglm_q_re, glmer_overall, type=output_type, se = list(generate_cluster_se(glm_mod_simple),
+                                                                                                            generate_cluster_se(glm_mod_overall))) %>% 
+    cat()
+}
+
+generate_question_level_res_binary(df_prep_models, 'text')
+generate_question_level_res_binary(df_incorrect_only, 'text')
+generate_question_level_res_binary(df_incorrect_only %>% 
+                              filter(passed_attention == "Passed attention"), 'text')
+```
+
+
+
+
+
+
+
+
+
+
